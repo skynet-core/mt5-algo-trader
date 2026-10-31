@@ -20,6 +20,170 @@ from pathlib import Path
 
 TRADES_REL = "trades.tsv"
 
+# Dynamic chart: JS renderer with wheel-zoom (cursor-anchored), drag-pan,
+# auto price refit to the visible time window, dbl-click reset, hover tooltips.
+# Plain string (not f-string) so braces stay single; __TRADES__/__DEPOSIT__ are tokens.
+CHART_JS = """
+const trades = __TRADES__;
+const DEPOSIT = __DEPOSIT__;
+const W = 1040, H = 430, ML = 72, MR = 16, MT = 18, MB = 34, IW = W - ML - MR, IH = H - MT - MB;
+const svg  = document.getElementById('chart');
+const tip  = document.getElementById('tip');
+const wrap = document.querySelector('.chartwrap');
+
+let tMin = Infinity, tMax = -Infinity;
+trades.forEach(t => { tMin = Math.min(tMin, t.ot); tMax = Math.max(tMax, t.ct !== null ? t.ct : t.ot); });
+if (tMax - tMin < 3600) { tMin -= 1800; tMax += 1800; }
+const FULL = { a: tMin, b: tMax };
+let view   = { a: tMin, b: tMax };
+
+let _run = DEPOSIT;
+const eq = trades.slice().filter(t => t.ct !== null).sort((x, y) => x.ct - y.ct)
+  .map(t => { _run += (t.profit || 0); return { t: t.ct, v: _run }; });
+
+function xOf(t) { return ML + (t - view.a) / (view.b - view.a) * IW; }
+function yOf(p, pmin, pmax) { return MT + (1 - (p - pmin) / (pmax - pmin)) * IH; }
+const span0 = FULL.b - FULL.a;
+
+function priceTicks(pmin, pmax, n) {
+  const raw = (pmax - pmin) / n;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  let step = mag * 10;
+  for (const m of [1, 2, 5, 10]) if (mag * m >= raw) { step = mag * m; break; }
+  const out = [];
+  for (let v = Math.ceil(pmin / step) * step; v <= pmax + step * 1e-6; v += step) out.push(v);
+  return out;
+}
+function timeTicks(a, b) {
+  const cands = [60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400,
+                 172800, 604800, 2592000, 7776000, 15552000, 31536000];
+  let step = cands[cands.length - 1];
+  for (const s of cands) if ((b - a) / s <= 8) { step = s; break; }
+  const out = [];
+  for (let t = Math.ceil(a / step) * step; t <= b; t += step) out.push(t);
+  return { out, step };
+}
+function tickLabel(t, step) {
+  const iso = new Date(t * 1000).toISOString();
+  if (step >= 86400) return iso.slice(0, 10);
+  return iso.slice(5, 16).replace('T', ' ') + ' ' + (iso.slice(11, 13) === '00' && step < 3600 ? '' : iso.slice(11, 13) + 'h');
+}
+
+function render() {
+  const vis = trades.filter(t => {
+    const lo = Math.min(t.ot, t.ct !== null ? t.ct : t.ot);
+    const hi = Math.max(t.ot, t.ct !== null ? t.ct : t.ot);
+    return hi >= view.a && lo <= view.b;
+  });
+  let pmin = Infinity, pmax = -Infinity;
+  vis.forEach(t => {
+    pmin = Math.min(pmin, t.open_price); pmax = Math.max(pmax, t.open_price);
+    if (t.close_price !== null) { pmin = Math.min(pmin, t.close_price); pmax = Math.max(pmax, t.close_price); }
+  });
+  if (!isFinite(pmin)) { pmin = 0; pmax = 1; }
+  if (pmax - pmin < 1e-9) { pmin -= 0.001; pmax += 0.001; }
+  const pad = (pmax - pmin) * 0.07; pmin -= pad; pmax += pad;
+  const Y = p => yOf(p, pmin, pmax);
+
+  let s = '<rect x="0" y="0" width="' + W + '" height="' + H + '" class="bg"/>';
+  priceTicks(pmin, pmax, 6).forEach(v => {
+    const y = Y(v).toFixed(1);
+    s += '<line x1="' + ML + '" x2="' + (W - MR) + '" y1="' + y + '" y2="' + y + '" class="grid"/>'
+      + '<text x="' + (ML - 8) + '" y="' + (Y(v) + 4).toFixed(1) + '" class="ax" text-anchor="end">' + v.toFixed(5) + '</text>';
+  });
+  const tk = timeTicks(view.a, view.b);
+  tk.out.forEach(t => {
+    const x = xOf(t).toFixed(1);
+    s += '<line x1="' + x + '" x2="' + x + '" y1="' + MT + '" y2="' + (H - MB) + '" class="grid"/>'
+      + '<text x="' + x + '" y="' + (H - MB + 18) + '" class="ax" text-anchor="middle">' + tickLabel(t, tk.step) + '</text>';
+  });
+  const ev = eq.filter(p => p.t >= view.a && p.t <= view.b);
+  if (ev.length > 1) {
+    let emin = Infinity, emax = -Infinity;
+    ev.forEach(p => { emin = Math.min(emin, p.v); emax = Math.max(emax, p.v); });
+    const rng = (emax - emin) || 1;
+    const EY = v => MT + (1 - (v - emin) / rng) * IH;
+    s += '<polyline class="equity" points="' + ev.map(p => xOf(p.t).toFixed(1) + ',' + EY(p.v).toFixed(1)).join(' ') + '"/>';
+    s += '<text class="eq" x="' + (W - MR - 4) + '" y="' + (MT + 12) + '" text-anchor="end">'
+       + 'equity ' + emin.toFixed(0) + ' … ' + emax.toFixed(0) + '</text>';
+  }
+  vis.forEach(t => {
+    const x0 = xOf(t.ot).toFixed(1), y0 = Y(t.open_price).toFixed(1);
+    s += '<circle class="pt o ' + (t.side === 'buy' ? 'b' : 's') + '" data-i="' + t.i + '" cx="' + x0 + '" cy="' + y0 + '" r="5"/>';
+    if (t.ct !== null) {
+      const x1 = xOf(t.ct).toFixed(1), y1 = Y(t.close_price).toFixed(1);
+      const cls = t.profit >= 0 ? 'win' : 'lose';
+      s += '<line class="link ' + cls + '" data-i="' + t.i + '" x1="' + x0 + '" y1="' + y0 + '" x2="' + x1 + '" y2="' + y1 + '"/>';
+      s += '<circle class="pt c ' + cls + '" data-i="' + t.i + '" cx="' + x1 + '" cy="' + y1 + '" r="5"/>';
+    }
+  });
+  svg.innerHTML = s;
+}
+
+function hot(i, on) {
+  svg.querySelectorAll('.link[data-i="' + i + '"]').forEach(l => l.classList.toggle('hot', on));
+}
+function moveTip(ev) {
+  const r = wrap.getBoundingClientRect();
+  let x = ev.clientX - r.left + 14, y = ev.clientY - r.top + 12;
+  if (x + tip.offsetWidth > r.width - 8) x = ev.clientX - r.left - tip.offsetWidth - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+function showTip(i, ev) {
+  const t = trades[i]; if (!t) return;
+  const p = t.profit === null ? '<span class="m">still open</span>'
+    : (t.profit >= 0 ? '<span class="g">+' + t.profit.toFixed(2) + '</span>'
+                     : '<span class="r">' + t.profit.toFixed(2) + '</span>');
+  const o = new Date(t.ot * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  const c = t.ct !== null ? new Date(t.ct * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : '—';
+  tip.innerHTML = (t.side === 'buy' ? '▲ BUY ' : '▼ SELL ') + '<b>' + t.vol + '</b> lots &nbsp;' + p + '<br>'
+    + '<span class="m">open</span>&nbsp;&nbsp; ' + o + ' @ ' + t.open_price + '<br>'
+    + '<span class="m">close&nbsp;</span> ' + c + (t.close_price !== null ? ' @ ' + t.close_price : '');
+  tip.style.display = 'block'; moveTip(ev);
+  hot(i, true);
+}
+svg.addEventListener('mouseover', e => {
+  const el = e.target.closest('[data-i]');
+  if (el) showTip(+el.getAttribute('data-i'), e);
+});
+svg.addEventListener('mousemove', e => { if (tip.style.display === 'block') moveTip(e); });
+svg.addEventListener('mouseout', e => {
+  const el = e.target.closest('[data-i]');
+  if (el) { tip.style.display = 'none'; hot(+el.getAttribute('data-i'), false); }
+});
+
+svg.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = svg.getBoundingClientRect();
+  const px = (e.clientX - r.left) * (W / r.width);
+  if (px < ML || px > W - MR) return;
+  const f = (px - ML) / IW;
+  const tAt = view.a + f * (view.b - view.a);
+  let span = (view.b - view.a) * Math.exp(e.deltaY * 0.0016);
+  span = Math.max(span0 / 500, Math.min(span, span0));
+  let a = tAt - f * span, b = a + span;
+  if (a < FULL.a) { a = FULL.a; b = a + span; }
+  if (b > FULL.b) { b = FULL.b; a = b - span; }
+  view = { a, b }; render();
+}, { passive: false });
+
+let drag = null;
+svg.addEventListener('mousedown', e => { drag = { x: e.clientX, span: view.b - view.a, va: view.a }; e.preventDefault(); });
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const r = svg.getBoundingClientRect();
+  const dt = -(e.clientX - drag.x) * drag.span / (IW * (r.width / W));
+  let a = drag.va + dt, b = a + drag.span;
+  if (a < FULL.a) { a = FULL.a; b = a + drag.span; }
+  if (b > FULL.b) { b = FULL.b; a = b - drag.span; }
+  view = { a, b }; render();
+});
+window.addEventListener('mouseup', () => { drag = null; });
+svg.addEventListener('dblclick', () => { view = { a: FULL.a, b: FULL.b }; render(); });
+
+render();
+"""
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -140,78 +304,12 @@ def _avg_trade(raw: dict, needle: str) -> str:
 
 
 def _svg(meta: dict, summary: dict, trades: list[dict]) -> str:
-    W, H = 1040, 430
-    ML, MR, MT, MB = 70, 16, 18, 34
-    iw, ih = W - ML - MR, H - MT - MB
-    ts = [t["open_t"] for t in trades] + [t["close_t"] for t in trades if t["close_t"]]
-    prices = [t["open_price"] for t in trades] + [t["close_price"] for t in trades if t["close_price"]]
-    if not ts or not prices:
+    if not trades:
         return ('<div class="nochart">No trade event data for this job '
                 '(trades.tsv missing — pre-logging-harness run).</div>')
-    t0, t1 = min(ts), max(ts)
-    if t0 == t1:
-        t0, t1 = t0 - 3600, t1 + 3600
-    pmin, pmax = min(prices), max(prices)
-    if pmin == pmax:
-        pmin, pmax = pmin - 0.001, pmax + 0.001
-
-    def X(t: float) -> float:
-        return ML + (t - t0) / (t1 - t0) * iw
-
-    def Y(p: float) -> float:
-        return MT + (1 - (p - pmin) / (pmax - pmin)) * ih
-
-    grid: list[str] = []
-    # price grid lines (5)
-    for i in range(6):
-        p = pmin + (pmax - pmin) * i / 5
-        y = Y(p)
-        grid.append(f'<line x1="{ML}" x2="{W - MR}" y1="{y:.1f}" y2="{y:.1f}" class="grid"/>'
-                    f'<text x="{ML - 8}" y="{y + 4:.1f}" class="ax" text-anchor="end">{p:.5f}</text>')
-    # time labels (7)
-    for i in range(7):
-        t = t0 + (t1 - t0) * i / 6
-        x = X(t)
-        lbl = datetime.fromtimestamp(t, UTC).strftime("%b %d %y")
-        grid.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{MT}" y2="{H - MB}" class="grid"/>'
-                    f'<text x="{x:.1f}" y="{H - MB + 18}" class="ax" text-anchor="middle">{lbl}</text>')
-
-    body: list[str] = []
-    eq: list[tuple[float, float]] = []
-    base = float(meta.get("deposit") or 1000)
-    running = base
-    for i, t in enumerate(trades):
-        x0, y0 = X(t["open_t"]), Y(t["open_price"])
-        ocls = "b" if t["side"] == "buy" else "s"
-        body.append(f'<circle class="pt o {ocls}" data-i="{i}" cx="{x0:.1f}" cy="{y0:.1f}" r="4.5"/>')
-        if t["close_t"]:
-            x1, y1 = X(t["close_t"]), Y(t["close_price"])
-            cls = "win" if t["profit"] >= 0 else "lose"
-            body.append(f'<line class="link {cls}" data-i="{i}" x1="{x0:.1f}" y1="{y0:.1f}" '
-                        f'x2="{x1:.1f}" y2="{y1:.1f}"/>')
-            body.append(f'<circle class="pt c {cls}" data-i="{i}" cx="{x1:.1f}" cy="{y1:.1f}" r="4.5"/>')
-            running += t["profit"]
-            eq.append((t["close_t"], running))
-
-    if len(eq) >= 2:
-        emin, emax = min(v for _, v in eq), max(v for _, v in eq)
-        if emin == emax:
-            emin, emax = emin - 1, emax + 1
-
-        def EY(v: float) -> float:
-            return MT + (1 - (v - emin) / (emax - emin)) * ih
-
-        body.append('<polyline class="equity" points="'
-                    + " ".join(f"{X(t):.1f},{EY(v):.1f}" for t, v in sorted(eq)) + '"/>')
-        body.append(f'<text class="eq" x="{W - MR - 4:.0f}" y="{MT + 12}" text-anchor="end">'
-                    f'equity {base:,.0f} → {running:,.2f}</text>')
-
-    return (f'<div class="chartwrap"><svg id="chart" viewBox="0 0 {W} {H}" width="{W}" height="{H}">'
-            f'<rect x="0" y="0" width="{W}" height="{H}" class="bg"/>'
-            + "".join(grid) + "".join(body) +
-            f"<text class='legend' x='{ML}' y='{H - 4}'>"
-            "● entry (up=buy / dn=sell)   ◆ exit   — win/loss line   ~ equity curve   · hover for details</text>"
-            "</svg><div id='tip'></div></div>")
+    return ('<div class="chartwrap"><svg id="chart" viewBox="0 0 1040 430" '
+            'width="1040" height="430"></svg><div id="tip"></div>'
+            '<div class="hint">scroll: zoom · drag: pan · dbl-click: reset · hover a point or line: details</div></div>')
 
 
 def _job_page(meta: dict, summary: dict, raw: dict, trades: list[dict]) -> str:
@@ -233,16 +331,19 @@ def _job_page(meta: dict, summary: dict, raw: dict, trades: list[dict]) -> str:
         {
             "i": k,
             "side": t["side"],
+            "ot": t["open_t"],
+            "ct": t["close_t"],
             "open": _iso(t["open_t"]),
             "close": _iso(t["close_t"]),
             "open_price": t["open_price"],
             "close_price": t["close_price"],
             "vol": t["vol"],
             "profit": round(t["profit"], 2) if t["close_t"] else None,
-            "open_only": t["close_t"] is None,
         }
         for k, t in enumerate(trades)
     ]).replace("</", "<\\/")
+    deposit = float(meta.get("deposit") or 1000)
+    chart_js = CHART_JS.replace("__TRADES__", trades_js).replace("__DEPOSIT__", repr(deposit))
     n_open = sum(1 for t in trades if t["close_t"] is None)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -278,6 +379,9 @@ def _job_page(meta: dict, summary: dict, raw: dict, trades: list[dict]) -> str:
         font-size:13px; line-height:1.5; white-space:nowrap; box-shadow:0 6px 24px #000a; }}
  #tip .g {{ color:#2ecc71; }} #tip .r {{ color:#ff5c5c; }} #tip .m {{ color:var(--mut); }}
  .nochart {{ padding:40px; color:var(--mut); text-align:center; }}
+ .hint {{ position:absolute; right:12px; top:8px; color:#66718c; font-size:12px; }}
+ svg {{ cursor:crosshair; }}
+ svg:active {{ cursor:grabbing; }}
  .foot {{ margin-top:14px; color:#5d6880; font-size:12px; }}
 </style></head><body>
 <h1>{html.escape(title)}</h1>
@@ -289,42 +393,7 @@ def _job_page(meta: dict, summary: dict, raw: dict, trades: list[dict]) -> str:
 <div class="foot">generated {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')} ·
 job dir <code>{html.escape(str(meta.get('version','')))}/{html.escape(str(meta.get('period_id','')))}/{html.escape(str(meta.get('preset_id','')))}</code></div>
 <script>
-const trades = {trades_js};
-const tip = document.getElementById('tip');
-const wrap = document.querySelector('.chartwrap');
-function show(i, ev) {{
-  const t = trades[i]; if (!t) return;
-  const p = t.profit === null ? '<span class="m">still open</span>'
-          : (t.profit >= 0 ? '<span class="g">+' + t.profit.toFixed(2) + '</span>'
-                           : '<span class="r">' + t.profit.toFixed(2) + '</span>');
-  tip.innerHTML = (t.side === 'buy' ? '▲ BUY ' : '▼ SELL ') +
-    '<b>' + t.vol + '</b> lots &nbsp; ' + p + '<br>' +
-    '<span class="m">open</span>&nbsp;&nbsp; ' + t.open + ' @ ' + t.open_price + '<br>' +
-    (t.close ? '<span class="m">close&nbsp;</span> ' + t.close + ' @ ' + t.close_price : '<span class="m">close&nbsp;</span> —');
-  tip.style.display = 'block'; move(ev);
-  document.querySelectorAll('.link[data-i="' + i + '"]').forEach(l => l.classList.add('hot'));
-}}
-function move(ev) {{
-  const r = wrap.getBoundingClientRect();
-  let x = ev.clientX - r.left + 14, y = ev.clientY - r.top + 12;
-  if (x + tip.offsetWidth > r.width - 8) x = ev.clientX - r.left - tip.offsetWidth - 14;
-  tip.style.left = x + 'px'; tip.style.top = y + 'px';
-}}
-function hide(i) {{
-  tip.style.display = 'none';
-  if (i !== undefined)
-    document.querySelectorAll('.link[data-i="' + i + '"]').forEach(l => l.classList.remove('hot'));
-}}
-document.querySelectorAll('#chart .pt').forEach(el => {{
-  el.addEventListener('mouseenter', ev => show(+el.dataset.i, ev));
-  el.addEventListener('mousemove', move);
-  el.addEventListener('mouseleave', () => hide(+el.dataset.i));
-}});
-document.querySelectorAll('#chart .link').forEach(el => {{
-  el.addEventListener('mouseenter', ev => show(+el.dataset.i, ev));
-  el.addEventListener('mousemove', move);
-  el.addEventListener('mouseleave', () => hide(+el.dataset.i));
-}});
+{chart_js}
 </script>
 </body></html>"""
 
