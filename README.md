@@ -1,6 +1,6 @@
 # mt5-algo-trader
 
-Run and improve the [`AlgoSamurai`](experts/AlgoSamurai.mq5) MT5 expert on a
+Run and improve the [`AlgoSamurai`](experts/AlgoSamurai/) MT5 expert on a
 fleet of **6 Arch Linux MT5 containers** (Wayland, headless) from
 [skynet-core/mt5-docker](https://github.com/skynet-core/mt5-docker).
 
@@ -22,22 +22,29 @@ Expert source changes are tracked with **git commits** (one per version);
 │   ├── m1.json … m4.json  # each: 3 distinct 12–24 M windows + 6 tester presets
 ├── pyproject.toml       # uv project (host-side MCP client)
 ├── experts/
-│   ├── AlgoSamurai.mq5  # baseline expert (v1.10)
-│   ├── AlgoSamurai-v1.20.mq5   # later improved versions (created by the loop)
+│   ├── AlgoSamurai/     # every expert source version, stored in place
+│   │   ├── 1.10.mq5     #   baseline
+│   │   ├── 1.20.mq5     #   later improved versions (created by the loop)
+│   │   └── …            #   one file per version: <version>.mq5
 │   └── winners/         # final top 3: source + results + summary (created by winners.py)
+├── .opencode/skills/    # reviewer/validator + math/statistics/trading skills for the loop
 ├── results/             # created by fleet.py
 │   ├── TABLE.md         # grouped by expert_version/time_period
 │   ├── table.csv        # flat rows
+│   ├── index.html       # human-friendly index; every job links to its report
 │   ├── VERSIONS.json    # version -> source, sha256, matrices, git_head, best row
 │   └── <version>/<window-id>/<preset>/
 │       ├── meta.json        # expert sha256, settings, container, timestamps
 │       ├── summary.json     # normalized stats + score
 │       ├── summary-raw.json # full reporter summary
+│       ├── trades.tsv       # observation-only open/close log written by the EA
+│       ├── report.html      # generated: cards + interactive SVG trade chart (reportgen)
 │       ├── report.htm       # original MT5 report
 │       ├── tester.ini       # the exact tester config used
 │       └── error.txt        # only on failure
 └── scripts/
     ├── mt5lib.py        # shared: MCP client, wine helpers, tester run, aggregation
+    ├── reportgen.py     # human-friendly HTML (report/index) + SVG trade chart
     ├── wait.py          # fleet health gate (exit 0 = ready)
     ├── backtest.py      # run ONE job on ONE container
     ├── fleet.py         # run the whole matrix on 6 containers + aggregate
@@ -61,9 +68,9 @@ image (pull it first: `docker pull ghcr.io/skynet-core/mt5-docker:archlinux`).
 ```sh
 docker compose up -d                        # 6 archlinux containers, Wayland headless
 uv run scripts/wait.py --timeout 2400       # health gate: 6/6 = exit 0
-uv run scripts/fleet.py --expert experts/AlgoSamurai.mq5 --name AlgoSamurai-v1.10
+uv run scripts/fleet.py --expert experts/AlgoSamurai/1.10.mq5 --name AlgoSamurai-1.10
 # ... improvement loop (see "Agent protocol") ...
-uv run scripts/fleet.py --expert experts/AlgoSamurai-v1.20.mq5 --name AlgoSamurai-v1.20
+uv run scripts/fleet.py --expert experts/AlgoSamurai/1.20.mq5 --name AlgoSamurai-1.20
 uv run scripts/winners.py --pick 3          # -> experts/winners/<version>/
 ```
 
@@ -103,10 +110,10 @@ uv run scripts/winners.py --pick 3          # -> experts/winners/<version>/
   mid-campaign. Each window runs all 6 presets:
 
   Tester models: `1` = every tick from real recorded ticks (includes real
-  spread/quote delay), `2` = every tick (OHLC, idealized fills). `risk-half`
-  runs with 5000 USD / L50 to stress risk sizing → **72 jobs per version**
-  (12 windows × 6 presets), 6 in parallel. The matrix files themselves are the
-  source of truth.
+  spread/quote delay), `2` = every tick (OHLC, idealized fills). **All presets
+  use the hard constraint: 1000 USD initial deposit, max leverage 1:30** →
+  **72 jobs per version** (12 windows × 6 presets), 6 in parallel. The matrix
+  files themselves are the source of truth.
 
 - **Scoring.** Rows with `<100 trades` or net loss are disqualified (DQ).
   `score = 20 · (net P/L ÷ max drawdown) + 10 · min(profit factor, 5)`;
@@ -154,22 +161,28 @@ Act as an autonomous agent when asked to run the loop. Rules:
 2. **Epoch.** `uv run scripts/fleet.py --expert <path> --name <version-tag>`.
    Exit code 0 = 72/72 jobs OK. 3 = partial (inspect `error.txt` per job,
    optionally re-run single jobs with `scripts/backtest.py --container …`).
-3. **Analyze (LLM gate, round 1).** Ask `openai/GPT-6.1 Sol`, providing
-   `results/TABLE.md`, the expert source and the diff to the previous version
-   (if any). Ask for: algorithm weaknesses, drawdown sources, and a concrete
-   list of code changes. No other action until it names specific changes.
+3. **Analyze (LLM gate, round 1).** Spawn a reviewer subagent on
+   `openai/GPT-6.1 Sol` with the **`algo-analyze`** skill (it loads the
+   `math`, `statistics`, `trading` skills): provide `results/TABLE.md`, the
+   expert source and the diff to the previous version (if any). It must return
+   a ranked list of concrete code changes (≤5) with rationale. No other action
+   until it names specific changes.
 4. **Implement.** Apply only approved changes to a **new file**
-   `experts/AlgoSamurai-v<next>.mq5`; bump `#property version`; never rewrite
-   an already-tested version file.
-5. **Validate (LLM gate, round 2).** Ask `openai/GPT-6.1 Sol` to validate the
-   new version line-by-line against MQL5 semantics (inputs, trailing edge
-   cases, lot math, broker distance handling). If it rejects → back to step 4.
+   `experts/AlgoSamurai/<next>.mq5` (next = highest existing + 0.10); bump
+   `#property version`; never rewrite an already-tested version file.
+5. **Validate (LLM gate, round 2).** Spawn a validator subagent on
+   `openai/GPT-6.1 Sol` with the **`algo-validate`** skill: line-by-line diff
+   check against MQL5 semantics, the 1000 USD / 1:30 constraint, lot math and
+   broker distance handling. If it rejects → back to step 4.
 6. **Commit (only after approval).**
-   `git add experts/AlgoSamurai-<vN+1>.mq5 && git commit -m "<vN+1>: <what changed>"`.
+   `git add experts/AlgoSamurai/<next>.mq5 && git commit -m "<next>: <what changed>"`.
    Every tested version must exist as exactly the bytes of one commit —
    `VERSIONS.json` records its `git_head` so results map back to git history.
-7. **Repeat 2–6** while `openai/GPT-6.1 Sol` still proposes concrete,
-   plausible improvements. Stop when it reports no new improvements.
+7. **Repeat 2–6** while the reviewer still proposes concrete,
+   plausible improvements and fewer than **3 profitable variants** exist
+   (a version is *profitable* when its window score beats its baseline and at
+   least half its windows show a net profit). Stop conditions: no new
+   proposals, or ≥3 profitable variants to compare.
 8. **Finalize.** `uv run scripts/winners.py --pick 3` → top 3 versions land in
    `experts/winners/<version>/` with source + results + summary. Report the
    ranking table and which versions were chosen.
@@ -177,9 +190,20 @@ Act as an autonomous agent when asked to run the loop. Rules:
 **Invariants (never break these):**
 
 - Demo account only; tester config always has `AllowLiveTrading=0`; no live orders.
+- **Core algorithm is sacred: every improved version must keep the original
+  AlgoSamurai behavior — pending buy-stop/sell-stop entries, trailing stop
+  loss, time/session filters and risk-based lot sizing — working the same way.
+  Changes are parameter/filter/exit tuning and hardening of THAT logic, never
+  a replacement of it (no new strategy, no different order flow).**
+   - Sanctioned exception: the observation-only trade-event logger
+     (`InpTradeLog`, `OnTradeTransaction`) only writes `trades.tsv`; no trading
+     logic reads it, so it does not alter behavior.
+- **Hard constraint: initial deposit 1000 USD, max leverage 1:30** — enforced
+  by the preset values in `matrices/*.json`; do not run any version with
+  different account settings.
 - One tester job per container at a time (the fleet scheduler enforces it).
 - Never delete or edit old `results/` or old expert versions; every version stays reproducible via its sha256 in `meta.json`.
-- Only `winners.py` may write into `experts/` (baseline files + loop-made versions are added, never rewritten); never test or overwrite expert sources with synthetic files.
+- Never overwrite an already-tested `experts/AlgoSamurai/<v>.mq5`; new versions only.
 - One expert version = one git commit; never amend or rewrite an already-tested version's commit.
 - Don't modify `matrices/` mid-campaign — comparability depends on it.
 - All evidence lives under `results/`; winners only under `experts/winners/`.
@@ -191,7 +215,7 @@ Act as an autonomous agent when asked to run the loop. Rules:
 |---|---|
 | `healthy` never reached | KWin needs `sudo modprobe udmabuf` (software rendering), then `docker compose up -d` again |
 | `terminal not connected` | first boot downloads broker data — `wait.py` covers it; check `docker compose logs` |
-| insufficient M1 history (long 24M windows) | broker depth limit — those preset rows are still valid for 12M windows; note it in the report |
+| `insufficient M1/M5 history` in wait.py | **warning only** — the tester fetches data via its own path and still trades M1/M5 (verified); if a job shows zero bars instead, see `error.txt` + `tester-process.log` |
 | report shows zero bars | symbol/period mismatch or history missing — see `error.txt` + `tester-process.log` |
 | port in use (`8001…8006`, `23001…`, `24001…`) | another instance of this fleet is running — `docker compose down` first |
 

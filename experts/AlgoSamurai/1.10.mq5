@@ -20,6 +20,7 @@ input bool   InpAutoLot              = true; // Size by monetary risk
 input double InpRiskPercent          = 1.0;  // Equity risk per trade (%) when AutoLot=true
 input double InpFixLot               = 0.1;  // Fixed lot when AutoLot=false
 input bool   InpOnePositionAtATime   = true; // Cancel pending orders while a position is open
+input bool   InpTradeLog             = true; // Observation only: log open/close events to MQL5\Files (no trading logic)
 
 input group "=== Order (points) ==="
 input int    InpStopLoss             = 150;  // Stop loss in points; 0 disables SL
@@ -49,6 +50,9 @@ int freezeLevelPts  = 0;
 datetime g_lastBuyStopSet  = 0;
 datetime g_lastSellStopSet = 0;
 datetime g_lastLotWarning  = 0;
+
+// Observation-only trade log (no trading logic depends on it).
+int    tradeLogHandle = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 //| Quote helpers                                                    |
@@ -130,6 +134,60 @@ void LotWarning(const string message)
 }
 
 //+------------------------------------------------------------------+
+//| Observation-only trade event log (MQL5\Files\AlgoSamurai_trades.csv)|
+//+------------------------------------------------------------------+
+void OpenTradeLog()
+{
+   tradeLogHandle = INVALID_HANDLE;
+   if(!InpTradeLog)
+      return;
+   if(FileIsExist("AlgoSamurai_trades.csv"))
+      FileDelete("AlgoSamurai_trades.csv");
+   tradeLogHandle = FileOpen("AlgoSamurai_trades.csv", FILE_WRITE|FILE_ANSI);
+   if(tradeLogHandle == INVALID_HANDLE)
+   {
+      Print("AlgoSamurai: trade log not opened (continuing without observation log)");
+      return;
+   }
+   FileWriteString(tradeLogHandle, "event\tticket\ttime\tside\tprice\tvolume\tprofit\tposition_id\n");
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   // Only deal additions matter for the open/close event stream.
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      return;
+   if(tradeLogHandle == INVALID_HANDLE)
+      return;
+   ulong dealTicket = trans.deal;
+   if(!HistoryDealSelect(dealTicket))
+      return;
+   long entry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+   bool isOpen  = (entry == DEAL_ENTRY_IN);
+   bool isClose = (entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_INOUT);
+   if(!isOpen && !isClose)
+      return;
+   string side = (HistoryDealGetInteger(dealTicket, DEAL_TYPE) == DEAL_TYPE_BUY) ? "buy" : "sell";
+   double price   = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+   double volume  = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+   double profit  = HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+                  + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION)
+                  + HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+   FileWriteString(tradeLogHandle,
+                   StringFormat("%s\t%I64u\t%I64d\t%s\t%s\t%s\t%s\t%I64u\n",
+                                 (isOpen ? "open" : "close"),
+                                 dealTicket,
+                                 (long)HistoryDealGetInteger(dealTicket, DEAL_TIME),
+                                 side,
+                                 DoubleToString(price, _Digits),
+                                 DoubleToString(volume, 2),
+                                 DoubleToString(profit, 2),
+                                 (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID)));
+}
+
+//+------------------------------------------------------------------+
 //| Expert initialization                                            |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -173,6 +231,7 @@ int OnInit()
    g_lastBuyStopSet  = 0;
    g_lastSellStopSet = 0;
    g_lastLotWarning  = 0;
+   OpenTradeLog();
    return INIT_SUCCEEDED;
 }
 
@@ -181,6 +240,8 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   if(tradeLogHandle != INVALID_HANDLE)
+      FileClose(tradeLogHandle);
    ObjectsDeleteAll(0, "AS_");
 }
 

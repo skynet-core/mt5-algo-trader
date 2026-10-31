@@ -2,7 +2,7 @@
 
 Usage:
     uv run scripts/backtest.py --container mt5-2 \
-        --expert experts/AlgoSamurai.mq5 --name AlgoSamurai-v1.10 \
+        --expert experts/AlgoSamurai/1.10.mq5 --name AlgoSamurai-1.10 \
         --matrix matrices/m1.json --preset tick-m15 --period m1-12M-a \
         [--out results] [--timeout 3600]
 """

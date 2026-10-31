@@ -37,7 +37,7 @@ async def probe_history(i: int, symbol: str, from_ts: int, to_ts: int, timeframe
 async def check_container(i: int, args: argparse.Namespace, env: dict, matrices: list) -> dict:
     name = mt5lib.container_name(i)
     result = {"container": name, "running": False, "mcp": False, "terminal": False,
-              "account_ok": False, "history": {}, "errors": []}
+              "account_ok": False, "history": {}, "warnings": [], "errors": []}
 
     def stamp(message: str):
         result["errors"].append(message)
@@ -109,7 +109,13 @@ async def check_container(i: int, args: argparse.Namespace, env: dict, matrices:
             bars = await probe_history(i, symbol, from_ts, to_ts, timeframe)
             result["history"][timeframe] = bars
             if bars < 100:
-                stamp(f"insufficient {timeframe} history: {bars} bars")
+                # Server-side M1/M5 depth is shallow on many brokers, but the
+                # tester fetches data via its own path and still produces trades
+                # (verified). Only block on M15 — every preset needs it.
+                if timeframe == "M15":
+                    stamp(f"insufficient {timeframe} history: {bars} bars")
+                else:
+                    result["warnings"].append(f"shallow {timeframe} on server: {bars} bars")
         except Exception as exc:
             result["history"][timeframe] = 0
             stamp(f"{timeframe} probe failed: {str(exc)[:120]}")

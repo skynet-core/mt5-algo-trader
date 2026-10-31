@@ -344,6 +344,28 @@ def score_row(row: dict) -> float | None:
 # ---------------------------------------------------------------------------
 
 
+def find_trades_log(container: str) -> str | None:
+    """Locate the EA's observation log inside the container.
+
+    The tester agent runs the EA with its own data dir (Tester/Agent-*/MQL5/Files);
+    fall back to the terminal's MQL5/Files. Returns the newest container path.
+    """
+    r = docker("exec", container, "sh", "-c",
+               "find " + f"{MT5}/Tester {MT5}/MQL5/Files" +
+               " -name AlgoSamurai_trades.csv -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1",
+               check=False)
+    line = r.stdout.decode(errors="replace").split()
+    if len(line) >= 2:
+        return line[1]
+    return None
+
+
+def delete_trades_log(container: str) -> None:
+    docker("exec", container, "sh", "-c",
+           "find " + f"{MT5}/Tester {MT5}/MQL5/Files" +
+           " -name AlgoSamurai_trades.csv -delete 2>/dev/null", check=False)
+
+
 @dataclass
 class JobResult:
     ok: bool
@@ -451,6 +473,8 @@ with os.fdopen(os.open(path, os.O_WRONLY | os.O_TRUNC), 'w', encoding='utf-16') 
         docker("exec", container, "systemctl", "stop", "mt5-mcp.service", check=False)
         if supervisor:
             docker("exec", container, "kill", "-STOP", supervisor, check=False)
+        # Stale observation log from a previous job — the EA recreates it on OnInit.
+        delete_trades_log(container)
     except Exception as exc:  # noqa: BLE001
         return fail(f"setup: {exc}")
 
@@ -492,10 +516,21 @@ with os.fdopen(os.open(path, os.O_WRONLY | os.O_TRUNC), 'w', encoding='utf-16') 
     row = summarize(summary_raw)
     row["score"] = score_row(row)
     meta["finished"] = datetime.now(UTC).isoformat(timespec="seconds")
+    # Observation-only trade event log written by the EA (trading logic untouched).
+    # It lives under the tester agent's data dir, not the terminal's.
+    remote_log = find_trades_log(container)
+    if remote_log:
+        docker("cp", f"{container}:{remote_log}",
+               str(output_dir / "trades.tsv"), check=False)
     (output_dir / "error.txt").unlink(missing_ok=True)  # clear stale failure marker
     (output_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     (output_dir / "summary.json").write_text(json.dumps(row, indent=2))
     (output_dir / "summary-raw.json").write_text(json.dumps(summary_raw, indent=2, default=str))
+    try:
+        import reportgen
+        reportgen.job_report(output_dir)
+    except Exception as exc:  # noqa: BLE001 - reporting must never fail a job
+        print(f"  [reportgen] job report skipped: {exc}", flush=True)
     return JobResult(True, version, period["id"], preset["id"], container,
                      summary=row, score=row["score"], output_dir=output_dir)
 
@@ -619,6 +654,11 @@ def write_tables(results_root: Path, rows: list[dict]) -> Path:
                 ]) + " |")
             lines.append("")
     (results_root / "TABLE.md").write_text("\n".join(lines))
+    try:
+        import reportgen
+        reportgen.index_report(results_root)
+    except Exception as exc:  # noqa: BLE001 - reporting must never fail aggregation
+        print(f"  [reportgen] index skipped: {exc}", flush=True)
     return results_root / "TABLE.md"
 
 

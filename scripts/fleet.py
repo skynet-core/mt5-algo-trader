@@ -5,7 +5,7 @@ Each container worker runs its jobs one at a time (MT5 only allows one
 terminal owner per container); jobs are dispatched round-robin.
 
 Usage:
-    uv run scripts/fleet.py --expert experts/AlgoSamurai.mq5 --name AlgoSamurai-v1.10 \
+    uv run scripts/fleet.py --expert experts/AlgoSamurai/1.10.mq5 --name AlgoSamurai-1.10 \
         [--matrix matrices] [--out results]
 """
 
