@@ -498,12 +498,17 @@ with os.fdopen(os.open(path, os.O_WRONLY | os.O_TRUNC), 'w', encoding='utf-16') 
         docker("exec", container, "rm", "-f", f"{MT5}/{job}.ini", check=False)
 
     report_local = output_dir / "report.htm"
-    deadline = time.monotonic() + 300
+    deadline = time.monotonic() + max(300, timeout)
     while docker(
         "cp", f"{container}:{MT5}/{job}.htm", str(report_local), check=False
     ).returncode:
         if time.monotonic() > deadline:
-            return fail("no test report produced (check tester-process.log)")
+            # the launcher returns in ~2s; a stuck job leaves the detached tester agent running —
+            # hard-kill it (polite WM_CLOSE is insufficient) so it cannot poison the next job.
+            # shortcut: pkill -f pattern matches the job's launcher, not the kiosk terminal (config.ini).
+            docker("exec", container, "pkill", "-9", "-f", "metatester64", check=False)
+            docker("exec", container, "pkill", "-9", "-f", "config:C:.MT5.job-", check=False)
+            return fail(f"no test report after {timeout}s (check tester-process.log)")
         time.sleep(2)
 
     summary_raw = report_summary(read_text(report_local))
