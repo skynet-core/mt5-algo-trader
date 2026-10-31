@@ -1,0 +1,102 @@
+# mt5-docker (Arch Linux) fleet: 6 MT5 terminals in Wayland headless mode.
+# Credentials are sourced from the hidden `.env` file in this directory
+# (Docker Compose reads `.env` automatically; see .env.example below).
+#
+#   docker compose up -d
+#   docker compose ps            # wait for 6x (health: healthy)
+#
+# Host ports (bound to 127.0.0.1), one set per container mt5-<i>:
+#   package MCP (mt5-mcp 0.6.3): 127.0.0.1:800<i>        (container 8000)
+#   native MT5 MCP proxy:        127.0.0.1:2300<i>       (container 22347)
+#   MetaEditor MCP proxy:        127.0.0.1:2400<i>       (container 22349)
+#
+# A fresh named volume per container keeps its own Wine prefix / MT5 data
+# installed and persisted across restarts.
+name: mt5-algo-trader
+
+x-mt5: &mt5
+  image: ghcr.io/skynet-core/mt5-docker:archlinux
+  privileged: true # systemd as PID 1; also exposes /dev/udmabuf needed for KWin software rendering
+  pids_limit: 8192
+  shm_size: 512m
+  stop_grace_period: 60s
+  tmpfs:
+    - /run
+    - /tmp:mode=1777
+  environment:
+    DISPLAY_BACKEND: wayland
+    DISPLAY_MODE: headless
+    DISPLAY_WIDTH: "1920"
+    DISPLAY_HEIGHT: "1080"
+    MT5_ACCOUNT: ${MT5_ACCOUNT:?set MT5_ACCOUNT in .env}
+    MT5_PASSWORD: ${MT5_PASSWORD:?set MT5_PASSWORD in .env}
+    MT5_SERVER: ${MT5_SERVER:?set MT5_SERVER in .env}
+
+services:
+  mt5-1:
+    <<: *mt5
+    container_name: mt5-1
+    ports:
+      - "127.0.0.1:8001:8000"
+      - "127.0.0.1:23001:22347"
+      - "127.0.0.1:24001:22349"
+    volumes:
+      - mt5-1-wine:/home/plasma/.wine
+
+  mt5-2:
+    <<: *mt5
+    container_name: mt5-2
+    ports:
+      - "127.0.0.1:8002:8000"
+      - "127.0.0.1:23002:22347"
+      - "127.0.0.1:24002:22349"
+    volumes:
+      - mt5-2-wine:/home/plasma/.wine
+
+  mt5-3:
+    <<: *mt5
+    container_name: mt5-3
+    ports:
+      - "127.0.0.1:8003:8000"
+      - "127.0.0.1:23003:22347"
+      - "127.0.0.1:24003:22349"
+    volumes:
+      - mt5-3-wine:/home/plasma/.wine
+
+  mt5-4:
+    <<: *mt5
+    container_name: mt5-4
+    ports:
+      - "127.0.0.1:8004:8000"
+      - "127.0.0.1:23004:22347"
+      - "127.0.0.1:24004:22349"
+    volumes:
+      - mt5-4-wine:/home/plasma/.wine
+
+  mt5-5:
+    <<: *mt5
+    container_name: mt5-5
+    ports:
+      - "127.0.0.1:8005:8000"
+      - "127.0.0.1:23005:22347"
+      - "127.0.0.1:24005:22349"
+    volumes:
+      - mt5-5-wine:/home/plasma/.wine
+
+  mt5-6:
+    <<: *mt5
+    container_name: mt5-6
+    ports:
+      - "127.0.0.1:8006:8000"
+      - "127.0.0.1:23006:22347"
+      - "127.0.0.1:24006:22349"
+    volumes:
+      - mt5-6-wine:/home/plasma/.wine
+
+volumes:
+  mt5-1-wine:
+  mt5-2-wine:
+  mt5-3-wine:
+  mt5-4-wine:
+  mt5-5-wine:
+  mt5-6-wine:

@@ -1,0 +1,16 @@
+{
+  "symbol": "EURUSD",
+  "periods": [
+    {"id": "m4-24M-a", "from": "2024.06.01", "to": "2026.05.31"},
+    {"id": "m4-24M-b", "from": "2024.09.01", "to": "2026.08.31"},
+    {"id": "m4-23M", "from": "2024.11.01", "to": "2026.09.30"}
+  ],
+  "presets": [
+    { "id": "tick-m15",  "model": 1, "period": "M15", "deposit": 10000, "leverage": 100, "note": "Every tick based on real ticks (recorded spread/delay), M15" },
+    { "id": "tick-m5",   "model": 1, "period": "M5",  "deposit": 10000, "leverage": 100, "note": "Real ticks, M5 entry granularity" },
+    { "id": "tick-m1",   "model": 1, "period": "M1",  "deposit": 10000, "leverage": 100, "note": "Real ticks, M1 entry granularity" },
+    { "id": "ohlc-m15",  "model": 2, "period": "M15", "deposit": 10000, "leverage": 100, "note": "Every tick (OHLC), idealized fills, M15" },
+    { "id": "ohlc-m1",   "model": 2, "period": "M1",  "deposit": 10000, "leverage": 100, "note": "Every tick (OHLC), idealized fills, M1" },
+    { "id": "risk-half", "model": 1, "period": "M15", "deposit": 5000,  "leverage": 50,  "note": "Half capital, L50 — margin/risk sizing stress" }
+  ]
+}
