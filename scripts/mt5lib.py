@@ -223,8 +223,18 @@ def compile_expert(container: str, source: Path, name: str) -> Path:
         "/log",
         check=False, timeout=300,
     )
-    log = docker("cp", f"{container}:{base}.log", "/dev/stdout", check=False).stdout
-    log_text = log.decode(errors="replace")
+    # MetaEditor exits rc=1 under Wine even on success — the log + .ex5 are
+    # authoritative. Give the compiler a few seconds to flush the log (cold start).
+    log_text = ""
+    for _ in range(10):
+        log = docker("exec", container, "cat", f"{base}.log", check=False).stdout
+        # MetaEditor writes this log as UTF-16LE — decoding as UTF-8 inserts NULs
+        # and hides the "0 errors" marker.
+        log_text = log.decode("utf-16", errors="replace") if log.startswith(
+            (b"\xff\xfe", b"\xfe\xff")) else log.decode("utf-8-sig", errors="replace")
+        if re.search(r"\b\d+ errors?", log_text, re.IGNORECASE):
+            break
+        time.sleep(1)
     if not re.search(r"\b0 errors?[,;]", log_text, re.IGNORECASE):
         raise RuntimeError(f"{name}: compilation failed:\n{log_text[-800:]}")
     exists = docker("exec", container, "test", "-s", f"{base}.ex5", check=False)
@@ -293,11 +303,15 @@ def to_float(value: str | None) -> float:
 
 def summarize(summary: dict[str, str]) -> dict:
     """Normalize an MT5 tester report into comparable numbers."""
-    dd_raw = pick(summary, "drawdown") or "0"
-    dd_pct = None
-    match = re.search(r"\(([\d.]+)\s*%\)", dd_raw)
-    if match:
-        dd_pct = float(match.group(1))
+    # Prefer MAXIMAL drawdown (the standard metric); "absolute" is just the
+    # drawdown at the final point.
+    dd_raw = (
+        pick(summary, "balance drawdown maximal")
+        or pick(summary, "equity drawdown maximal")
+        or pick(summary, "drawdown") or "0"
+    )
+    dd_match = re.search(r"\(([\d.]+)\s*%\)", dd_raw)
+    pt_match = re.search(r"([\d.]+)\s*%", pick(summary, "profit trades") or "")
     return {
         "trades": int(to_float(pick(summary, "total trades"))),
         "profit_factor": to_float(pick(summary, "profit factor")),
@@ -305,8 +319,8 @@ def summarize(summary: dict[str, str]) -> dict:
         "gross_profit": to_float(pick(summary, "gross profit")),
         "gross_loss": to_float(pick(summary, "gross loss")),
         "max_drawdown": to_float(dd_raw),
-        "max_drawdown_pct": dd_pct,
-        "profitable_trades_pct": to_float(pick(summary, "profitable trades")),
+        "max_drawdown_pct": float(dd_match.group(1)) if dd_match else None,
+        "profitable_trades_pct": float(pt_match.group(1)) if pt_match else 0.0,
         "bars": int(to_float(pick(summary, "bars"))),
     }
 
@@ -478,6 +492,7 @@ with os.fdopen(os.open(path, os.O_WRONLY | os.O_TRUNC), 'w', encoding='utf-16') 
     row = summarize(summary_raw)
     row["score"] = score_row(row)
     meta["finished"] = datetime.now(UTC).isoformat(timespec="seconds")
+    (output_dir / "error.txt").unlink(missing_ok=True)  # clear stale failure marker
     (output_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     (output_dir / "summary.json").write_text(json.dumps(row, indent=2))
     (output_dir / "summary-raw.json").write_text(json.dumps(summary_raw, indent=2, default=str))
