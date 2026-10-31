@@ -104,7 +104,7 @@ def write_winner(root: Path, version: dict, rows: list[dict]) -> Path:
         f"- Minimum trades across runs: {version['trades']}",
         f"- Expert source: {source or 'unknown'}",
         f"- Expert sha256: {info.get('sha256', 'unknown')}",
-        f"- Git revision: {info.get('git', 'unknown')}",
+        f"- Git revision: {info.get('git_head', info.get('git', 'unknown'))}",
         "",
         "## Best per window",
         "",
